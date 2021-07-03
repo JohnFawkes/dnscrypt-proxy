@@ -131,11 +131,6 @@ section
 t || grep -Fq 'tracker.debian.org' allowed-names.log || fail
 t || grep -Fq '*.tracker.debian' allowed-names.log || fail
 
-if [ -s error.log ]; then
-    cat *.log
-    exit 1
-fi
-
 section
 ../dnscrypt-proxy/dnscrypt-proxy -loglevel 3 -config test3-dnscrypt-proxy.toml -pidfile /tmp/dnscrypt-proxy.pidfile &
 sleep 5
@@ -148,17 +143,6 @@ kill $(cat /tmp/dnscrypt-proxy.pidfile)
 sleep 5
 
 section
-../dnscrypt-proxy/dnscrypt-proxy -loglevel 3 -config test-odoh-direct.toml -pidfile /tmp/odoh-direct.pidfile &
-sleep 5
-
-section
-t || dig -p${DNS_PORT} A microsoft.com @127.0.0.1 | grep -Fq "NOERROR" || fail
-t || dig -p${DNS_PORT} A cloudflare.com @127.0.0.1 | grep -Fq "NOERROR" || fail
-
-kill $(cat /tmp/odoh-direct.pidfile)
-sleep 5
-
-section
 ../dnscrypt-proxy/dnscrypt-proxy -loglevel 3 -config test-odoh-proxied.toml -pidfile /tmp/odoh-proxied.pidfile &
 sleep 5
 
@@ -168,3 +152,8 @@ t || dig -p${DNS_PORT} A cloudflare.com @127.0.0.1 | grep -Fq "NOERROR" || fail
 
 kill $(cat /tmp/odoh-proxied.pidfile)
 sleep 5
+
+if [ -s error.log ]; then
+    cat *.log
+    exit 1
+fi

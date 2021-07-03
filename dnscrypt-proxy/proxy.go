@@ -4,6 +4,7 @@ import (
 	"context"
 	crypto_rand "crypto/rand"
 	"encoding/binary"
+	"math/rand"
 	"net"
 	"os"
 	"runtime"
@@ -37,7 +38,6 @@ type Proxy struct {
 	listenAddresses               []string
 	localDoHListenAddresses       []string
 	xTransport                    *XTransport
-	dohCreds                      *map[string]DOHClientCreds
 	allWeeklyRanges               *map[string]WeeklyRanges
 	routes                        *map[string][]string
 	captivePortalMap              *CaptivePortalMap
@@ -101,6 +101,7 @@ type Proxy struct {
 	SourceIPv6                    bool
 	SourceDNSCrypt                bool
 	SourceDoH                     bool
+	SourceODoH                    bool
 }
 
 func (proxy *Proxy) registerUDPListener(conn *net.UDPConn) {
@@ -328,7 +329,8 @@ func (proxy *Proxy) updateRegisteredServers() error {
 				}
 			} else {
 				if !((proxy.SourceDNSCrypt && registeredServer.stamp.Proto == stamps.StampProtoTypeDNSCrypt) ||
-					(proxy.SourceDoH && registeredServer.stamp.Proto == stamps.StampProtoTypeDoH)) {
+					(proxy.SourceDoH && registeredServer.stamp.Proto == stamps.StampProtoTypeDoH) ||
+					(proxy.SourceODoH && registeredServer.stamp.Proto == stamps.StampProtoTypeODoHTarget)) {
 					continue
 				}
 				var found bool
@@ -680,7 +682,10 @@ func (proxy *Proxy) processIncomingQuery(clientProto string, serverProto string,
 			}
 		} else if serverInfo.Proto == stamps.StampProtoTypeODoHTarget {
 			tid := TransactionID(query)
-			target := serverInfo.odohTargets[0]
+			if len(serverInfo.odohTargetConfigs) == 0 {
+				return
+			}
+			target := serverInfo.odohTargetConfigs[rand.Intn(len(serverInfo.odohTargetConfigs))]
 			odohQuery, err := target.encryptQuery(query)
 			if err != nil {
 				dlog.Errorf("Failed to encrypt query for [%v]", serverName)
@@ -688,9 +693,9 @@ func (proxy *Proxy) processIncomingQuery(clientProto string, serverProto string,
 			} else {
 				targetURL := serverInfo.URL
 				if serverInfo.Relay != nil && serverInfo.Relay.ODoH != nil {
-					targetURL = serverInfo.Relay.ODoH.url
+					targetURL = serverInfo.Relay.ODoH.URL
 				}
-				responseBody, responseCode, _, _, err := proxy.xTransport.ObliviousDoHQuery(targetURL, odohQuery.odohMessage, proxy.timeout)
+				responseBody, responseCode, _, _, err := proxy.xTransport.ObliviousDoHQuery(serverInfo.useGet, targetURL, odohQuery.odohMessage, proxy.timeout)
 				if err == nil && len(responseBody) > 0 && responseCode == 200 {
 					response, err = odohQuery.decryptResponse(responseBody)
 					if err != nil {

@@ -79,6 +79,7 @@ type Config struct {
 	SourceRequireNoFilter    bool                        `toml:"require_nofilter"`
 	SourceDNSCrypt           bool                        `toml:"dnscrypt_servers"`
 	SourceDoH                bool                        `toml:"doh_servers"`
+	SourceODoH               bool                        `toml:"odoh_servers"`
 	SourceIPv4               bool                        `toml:"ipv4_servers"`
 	SourceIPv6               bool                        `toml:"ipv6_servers"`
 	MaxClients               uint32                      `toml:"max_clients"`
@@ -131,6 +132,7 @@ func newConfig() Config {
 		SourceIPv6:               false,
 		SourceDNSCrypt:           true,
 		SourceDoH:                true,
+		SourceODoH:               false,
 		MaxClients:               250,
 		BootstrapResolvers:       []string{DefaultBootstrapResolver},
 		IgnoreSystemDNS:          false,
@@ -369,6 +371,7 @@ func ConfigLoad(proxy *Proxy, flags *ConfigFlags) error {
 	proxy.xTransport.tlsCipherSuite = config.TLSCipherSuite
 	proxy.xTransport.mainProto = proxy.mainProto
 	if len(config.BootstrapResolvers) == 0 && len(config.BootstrapResolversLegacy) > 0 {
+		dlog.Warnf("fallback_resolvers was renamed to bootstrap_resolvers - Please update your configuration")
 		config.BootstrapResolvers = config.BootstrapResolversLegacy
 	}
 	if len(config.BootstrapResolvers) > 0 {
@@ -618,17 +621,20 @@ func ConfigLoad(proxy *Proxy, flags *ConfigFlags) error {
 	if config.DoHClientX509AuthLegacy.Creds != nil {
 		return errors.New("[tls_client_auth] has been renamed to [doh_client_x509_auth] - Update your config file")
 	}
-	configClientCreds := config.DoHClientX509Auth.Creds
-	creds := make(map[string]DOHClientCreds)
-	for _, configClientCred := range configClientCreds {
-		credFiles := DOHClientCreds{
+	dohClientCreds := config.DoHClientX509Auth.Creds
+	if len(dohClientCreds) > 0 {
+		dlog.Noticef("Enabling TLS authentication")
+		configClientCred := dohClientCreds[0]
+		if len(dohClientCreds) > 1 {
+			dlog.Fatal("Only one tls_client_auth entry is currently supported")
+		}
+		proxy.xTransport.tlsClientCreds = DOHClientCreds{
 			clientCert: configClientCred.ClientCert,
 			clientKey:  configClientCred.ClientKey,
 			rootCA:     configClientCred.RootCA,
 		}
-		creds[configClientCred.ServerName] = credFiles
+		proxy.xTransport.rebuildTransport()
 	}
-	proxy.dohCreds = &creds
 
 	// Backwards compatibility
 	config.BrokenImplementations.FragmentsBlocked = append(config.BrokenImplementations.FragmentsBlocked, config.BrokenImplementations.BrokenQueryPadding...)
@@ -648,6 +654,7 @@ func ConfigLoad(proxy *Proxy, flags *ConfigFlags) error {
 		config.SourceIPv6 = true
 		config.SourceDNSCrypt = true
 		config.SourceDoH = true
+		config.SourceODoH = true
 	}
 
 	var requiredProps stamps.ServerInformalProperties
@@ -667,6 +674,7 @@ func ConfigLoad(proxy *Proxy, flags *ConfigFlags) error {
 	proxy.SourceIPv6 = config.SourceIPv6
 	proxy.SourceDNSCrypt = config.SourceDNSCrypt
 	proxy.SourceDoH = config.SourceDoH
+	proxy.SourceODoH = config.SourceODoH
 
 	netprobeTimeout := config.NetprobeTimeout
 	flag.Visit(func(flag *flag.Flag) {
