@@ -40,8 +40,9 @@ const (
 )
 
 type CachedIPItem struct {
-	ip         net.IP
-	expiration *time.Time
+	ip            net.IP
+	expiration    *time.Time
+	updatingUntil *time.Time
 }
 
 type CachedIPs struct {
@@ -56,7 +57,7 @@ type AltSupport struct {
 
 type XTransport struct {
 	transport                *http.Transport
-	h3Transport              *http3.RoundTripper
+	h3Transport              *http3.Transport
 	keepAlive                time.Duration
 	timeout                  time.Duration
 	cachedIPs                CachedIPs
@@ -105,7 +106,7 @@ func ParseIP(ipStr string) net.IP {
 // If ttl < 0, never expire
 // Otherwise, ttl is set to max(ttl, MinResolverIPTTL)
 func (xTransport *XTransport) saveCachedIP(host string, ip net.IP, ttl time.Duration) {
-	item := &CachedIPItem{ip: ip, expiration: nil}
+	item := &CachedIPItem{ip: ip, expiration: nil, updatingUntil: nil}
 	if ttl >= 0 {
 		if ttl < MinResolverIPTTL {
 			ttl = MinResolverIPTTL
@@ -118,8 +119,21 @@ func (xTransport *XTransport) saveCachedIP(host string, ip net.IP, ttl time.Dura
 	xTransport.cachedIPs.Unlock()
 }
 
-func (xTransport *XTransport) loadCachedIP(host string) (ip net.IP, expired bool) {
-	ip, expired = nil, false
+// Mark an entry as being updated
+func (xTransport *XTransport) markUpdatingCachedIP(host string) {
+	xTransport.cachedIPs.Lock()
+	item, ok := xTransport.cachedIPs.cache[host]
+	if ok {
+		now := time.Now()
+		until := now.Add(xTransport.timeout)
+		item.updatingUntil = &until
+		xTransport.cachedIPs.cache[host] = item
+	}
+	xTransport.cachedIPs.Unlock()
+}
+
+func (xTransport *XTransport) loadCachedIP(host string) (ip net.IP, expired bool, updating bool) {
+	ip, expired, updating = nil, false, false
 	xTransport.cachedIPs.RLock()
 	item, ok := xTransport.cachedIPs.cache[host]
 	xTransport.cachedIPs.RUnlock()
@@ -130,6 +144,9 @@ func (xTransport *XTransport) loadCachedIP(host string) (ip net.IP, expired bool
 	expiration := item.expiration
 	if expiration != nil && time.Until(*expiration) < 0 {
 		expired = true
+		if item.updatingUntil != nil && time.Until(*item.updatingUntil) > 0 {
+			updating = true
+		}
 	}
 	return
 }
@@ -153,7 +170,7 @@ func (xTransport *XTransport) rebuildTransport() {
 			ipOnly := host
 			// resolveAndUpdateCache() is always called in `Fetch()` before the `Dial()`
 			// method is used, so that a cached entry must be present at this point.
-			cachedIP, _ := xTransport.loadCachedIP(host)
+			cachedIP, _, _ := xTransport.loadCachedIP(host)
 			if cachedIP != nil {
 				if ipv4 := cachedIP.To4(); ipv4 != nil {
 					ipOnly = ipv4.String()
@@ -217,7 +234,7 @@ func (xTransport *XTransport) rebuildTransport() {
 		tlsClientConfig.Certificates = []tls.Certificate{cert}
 	}
 
-	overrideCipherSuite := xTransport.tlsCipherSuite != nil && len(xTransport.tlsCipherSuite) > 0
+	overrideCipherSuite := len(xTransport.tlsCipherSuite) > 0
 	if xTransport.tlsDisableSessionTickets || overrideCipherSuite {
 		tlsClientConfig.SessionTicketsDisabled = xTransport.tlsDisableSessionTickets
 		if !xTransport.tlsDisableSessionTickets {
@@ -263,7 +280,7 @@ func (xTransport *XTransport) rebuildTransport() {
 			dlog.Debugf("Dialing for H3: [%v]", addrStr)
 			host, port := ExtractHostAndPort(addrStr, stamps.DefaultPort)
 			ipOnly := host
-			cachedIP, _ := xTransport.loadCachedIP(host)
+			cachedIP, _, _ := xTransport.loadCachedIP(host)
 			network := "udp4"
 			if cachedIP != nil {
 				if ipv4 := cachedIP.To4(); ipv4 != nil {
@@ -294,7 +311,7 @@ func (xTransport *XTransport) rebuildTransport() {
 			tlsCfg.ServerName = host
 			return quic.DialEarly(ctx, udpConn, udpAddr, tlsCfg, cfg)
 		}
-		h3Transport := &http3.RoundTripper{DisableCompression: true, TLSClientConfig: &tlsClientConfig, Dial: dial}
+		h3Transport := &http3.Transport{DisableCompression: true, TLSClientConfig: &tlsClientConfig, Dial: dial}
 		xTransport.h3Transport = h3Transport
 	}
 }
@@ -402,10 +419,12 @@ func (xTransport *XTransport) resolveAndUpdateCache(host string) error {
 	if ParseIP(host) != nil {
 		return nil
 	}
-	cachedIP, expired := xTransport.loadCachedIP(host)
-	if cachedIP != nil && !expired {
+	cachedIP, expired, updating := xTransport.loadCachedIP(host)
+	if cachedIP != nil && (!expired || updating) {
 		return nil
 	}
+	xTransport.markUpdatingCachedIP(host)
+
 	var foundIP net.IP
 	var ttl time.Duration
 	var err error
